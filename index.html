@@ -84,7 +84,7 @@
     <div class="btn-side p1"></div>
     <div class="btn-side p2"></div>
     <div class="screen">
-      <canvas id="c" width="1440" height="2560"></canvas>
+      <canvas id="c" width="1080" height="1920"></canvas>
     </div>
   </div>
   <div class="controls">
@@ -102,7 +102,7 @@
     </button>
     <button class="btn-dl" id="dlBtn">
       <svg class="icon" viewBox="0 0 24 24" fill="currentColor"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
-      <span id="dlLabel">تنزيل الفيديو مباشرة</span>
+      <span id="dlLabel">تنزيل الفيديو بالصوت</span>
     </button>
     <button class="btn-reset" id="resetBtn">
       <svg class="icon" viewBox="0 0 24 24" fill="currentColor"><path d="M17.65 6.35A7.96 7.96 0 0 0 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08A5.99 5.99 0 0 1 12 18c-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
@@ -111,7 +111,7 @@
     <div class="progress"><div class="progress-bar" id="bar"></div></div>
     <div class="time" id="time">00:00 / 00:16</div>
     <div class="status" id="status">جاهز للتشغيل</div>
-    <div class="note">التصدير مباشر وآمن للمتصفح دون استخدام ذاكرة زائدة.</div>
+    <div class="note">تم ربط مجرى الصوت برمجياً مع الفيديو لإنتاج ملف متكامل بسلاسة وعالية الجودة.</div>
   </div>
 </div>
 
@@ -258,14 +258,25 @@ function staggerWords(text, cx, cy, font, opts){
   ctx.restore();
 }
 
-let audioCtx = null, master = null, noiseBuf = null;
+/* ============================================================
+   AUDIO SETUP WITH MEDIASTREAM ROUTING (FOR RECORDING)
+   ============================================================ */
+let audioCtx = null, master = null, noiseBuf = null, audioDest = null;
+
 function initAudio(){
   if(audioCtx) return;
   audioCtx = new (window.AudioContext||window.webkitAudioContext)();
   master = audioCtx.createGain();
   master.gain.value = 0.9;
+  
+  // ربط الصوت بالسماعات الخارجية
   master.connect(audioCtx.destination);
+
+  // إنشاء مجرى صوت برمجي لتسجيله مع الفيديو
+  audioDest = audioCtx.createMediaStreamDestination();
+  master.connect(audioDest);
 }
+
 function getNoise(){
   if(noiseBuf) return noiseBuf;
   const len = Math.floor(audioCtx.sampleRate);
@@ -1545,9 +1556,12 @@ function reset(){
 }
 
 /* ============================================================
-   EXPORT FUNCTION (NATIVE MEDIA RECORDER - NO MEMORY CRASH)
+   EXPORT FUNCTION (SYNCHRONIZED WITH AUDIO)
    ============================================================ */
 async function exportVideo(){
+  initAudio();
+  if (audioCtx.state === 'suspended') await audioCtx.resume();
+
   stopVoice();
   cancelAnimationFrame(rafId);
   playing = false;
@@ -1557,16 +1571,24 @@ async function exportVideo(){
   resetBtn.disabled = true;
   dlBtn.classList.add('busy');
   dlLabel.textContent = 'جاري التصدير...';
-  statusEl.textContent = '⏳ جاري تصدير الفيديو...';
+  statusEl.textContent = '⏳ جاري تسجيل الفيديو بالصوت...';
 
   try {
-    const stream = canvas.captureStream(30);
-    let mimeType = 'video/webm;codecs=vp9';
-    if (!MediaRecorder.isTypeSupported(mimeType)) mimeType = 'video/webm;codecs=vp8';
+    // 1. التقاط مسار الفيديو من Canvas ومسار الصوت من AudioContext
+    const canvasStream = canvas.captureStream(30);
+    const audioTrack = audioDest.stream.getAudioTracks()[0];
+
+    const combinedTracks = [...canvasStream.getVideoTracks()];
+    if (audioTrack) combinedTracks.push(audioTrack);
+
+    const combinedStream = new MediaStream(combinedTracks);
+
+    let mimeType = 'video/webm;codecs=vp9,opus';
+    if (!MediaRecorder.isTypeSupported(mimeType)) mimeType = 'video/webm;codecs=vp8,opus';
     if (!MediaRecorder.isTypeSupported(mimeType)) mimeType = 'video/webm';
     if (!MediaRecorder.isTypeSupported(mimeType)) mimeType = 'video/mp4';
 
-    const recorder = new MediaRecorder(stream, {
+    const recorder = new MediaRecorder(combinedStream, {
       mimeType: mimeType,
       videoBitsPerSecond: 8000000
     });
@@ -1588,7 +1610,7 @@ async function exportVideo(){
       a.click();
       document.body.removeChild(a);
 
-      statusEl.textContent = '✓ تم التنزيل بنجاح!';
+      statusEl.textContent = '✓ تم التنزيل بنجاح مع الصوت!';
       dlLabel.textContent = 'تنزيل الفيديو مرة أخرى';
       dlBtn.disabled = false;
       playBtn.disabled = false;
@@ -1597,16 +1619,20 @@ async function exportVideo(){
       barEl.style.width = '100%';
     };
 
+    // 2. بدء التسغيل والتسجيل المتزامن
+    fired = {};
+    startTime = performance.now();
+    playing = true;
     recorder.start();
-    const startTimeRec = performance.now();
 
     function recLoop(){
-      const t = (performance.now() - startTimeRec) / 1000;
+      const t = (performance.now() - startTime) / 1000;
       if (t <= DURATION) {
         render(t);
         rafId = requestAnimationFrame(recLoop);
       } else {
         render(DURATION);
+        playing = false;
         recorder.stop();
       }
     }
